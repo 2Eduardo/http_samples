@@ -1,25 +1,28 @@
 /*
- * Esse primeiro exemplo realiza uma requisição do tipo GET para um servidor
- * e então armazena sua resposta em um arquivo.
+ * In this first example, we are going to make a GET request to the server and
+ * then we store its response in a file.
+ *
+ * Note: I don't deal with memory errors since it's an example,
+ * some others errors can also be ommited for simplicity.
  */
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
 
-#include <unistd.h>
+#include <unistd.h> /* for close() */
 
-#include <netdb.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
+#include <sys/socket.h> /* for socket() and sockaddr */
+#include <arpa/inet.h>  /* for inet_ntop() */
+#include <netdb.h>      /* for  addrinfo and getaddrinfo() */
 
 #define SERVERHOST "www.example.org"
 #define PORT 80
 
-static void init_sockaddr (struct sockaddr_in *name,
-			   const char *hostname,
-                           uint16_t port);
+/* Given a HOSTNAME and a PORT returns the matching SOCKADDR
+ * for that host and store the SOCKADDR length into ADDR_LEN. */
+static struct sockaddr *get_sockaddr (const char *hostname, uint16_t port,
+                                      socklen_t *addr_len);
 
 static void write_to_server (int fd);
 static char *read_from_server (int fd);
@@ -28,10 +31,23 @@ int
 main ()
 {
   int sock;
-  struct sockaddr_in servername;
+  struct sockaddr *server_addr;
+  socklen_t addr_size;
+
+  server_addr = get_sockaddr (SERVERHOST, PORT, &addr_size);
+
+  if (!server_addr)
+    {
+      fprintf (stderr, "Could not locate %s\n", SERVERHOST);
+      return EXIT_FAILURE;
+    }
+
+  /* Create the socket, either IPv4 or IPv6. */
+  if (server_addr->sa_family == PF_INET)
+      sock = socket (PF_INET, SOCK_STREAM, 0);
+  else
+    sock = socket (PF_INET6, SOCK_STREAM, 0);
   
-  /* Create the socket. */
-  sock = socket (PF_INET, SOCK_STREAM, 0);
   if (sock < 0)
     {
       perror ("socket");
@@ -39,8 +55,7 @@ main ()
     }
 
   /* Connect to the server. */
-  init_sockaddr (&servername, SERVERHOST, PORT);
-  if (connect (sock, (struct sockaddr *)&servername, sizeof (servername)) < 0)
+  if (connect (sock, server_addr, addr_size) < 0)
     {
       perror ("connect (client)");
       close (sock);
@@ -55,8 +70,8 @@ main ()
 
   if (res)
     {
+      /* Create a file to store the response. */
       FILE *out = fopen ("response.txt", "w");
-      int out_fd;
       
       if (!out)
 	{
@@ -66,10 +81,9 @@ main ()
 	  return EXIT_FAILURE;
 	}
 
-      /* Writing the response in a file. */
-      out_fd = fileno (out);
-      if ((write (out_fd, res, strlen (res))) < 0)
-        perror ("write to: response.txt failed");
+      /* Writing the response to the file. */
+      if (fwrite (res, sizeof (char), strlen (res), out) < 0)
+        perror ("fwrite to: response.txt failed");
 
       free (res);
       fclose (out);
@@ -81,25 +95,46 @@ main ()
   return 0;
 }
 
-static void
-init_sockaddr (struct sockaddr_in *name, const char *hostname, uint16_t port)
+static struct sockaddr *
+get_sockaddr (const char *hostname, uint16_t port, socklen_t *addr_len)
 {
-  struct hostent *hostinfo;
+  struct sockaddr *result;
+  struct addrinfo hints = {};
+  struct addrinfo *hostinfo;
+  char port_str[4];
 
-  /* Setting the adrress family to the IPv4 format. */
-  name->sin_family = AF_INET;
-  /* htons() convert a host endianess to the internet endianess. */
-  name->sin_port = htons (port);
-
-  /* Getting the host information, its IPv4 adrress.*/
-  hostinfo = gethostbyname (hostname);
-  if (!hostinfo)
+  hints.ai_family = PF_UNSPEC;
+  hints.ai_socktype = SOCK_STREAM;
+  
+  sprintf (port_str, "%d", port);
+  if (getaddrinfo (hostname, port_str, &hints, &hostinfo) != 0)
     {
-      fprintf (stderr, "Unknown host %s\n", hostname);
-      return;
+      perror ("getaddrinfo");
+      return NULL;
     }
 
-  name->sin_addr = *(struct in_addr *)hostinfo->h_addr;
+  if (addr_len)
+    *addr_len = hostinfo->ai_addrlen;
+  
+  result = malloc (hostinfo->ai_addrlen);
+  memcpy (result, hostinfo->ai_addr, hostinfo->ai_addrlen);
+
+  /* debug */
+  {
+    char addr_str[100];
+    void *ptr;
+    
+    if (hostinfo->ai_family == AF_INET)
+      ptr = &((struct sockaddr_in *)result)->sin_addr;
+    else
+      ptr = &((struct sockaddr_in6 *)result)->sin6_addr;
+    
+    inet_ntop (result->sa_family, ptr, addr_str, 100);
+    puts (addr_str);
+  }
+
+  freeaddrinfo (hostinfo);
+  return result;
 }
 
 static void
@@ -107,7 +142,7 @@ write_to_server (int fd)
 {
   int nbytes;
   const char *req =
-    "GET /index.html HTTP/1.0\n"
+    "GET / HTTP/1.0\n"
     "From: example@ex.com\n"
     "User-Agent: HTTPTool/1.0\n"
     "\n";
@@ -131,8 +166,13 @@ read_from_server (int fd)
 
   while ((nbytes = read (fd, buf_ptr, remain_size)) >= 0)
     {
-      if (nbytes == 0)
-	return buf;
+      if (nbytes < remain_size)
+	{
+	  size_t final_size = bufsize + nbytes;
+	  buf = realloc (buf, final_size);
+	  buf[final_size - 1] = '\0';
+	  return buf;
+	}
       else
 	{
 	  size_t oldsize = bufsize;
@@ -149,4 +189,5 @@ read_from_server (int fd)
   free (buf);
   return NULL;
 }
+
 
